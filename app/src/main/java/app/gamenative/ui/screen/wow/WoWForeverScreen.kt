@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Environment
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -36,7 +37,6 @@ import app.gamenative.BuildConfig
 import app.gamenative.PluviaApp
 import app.gamenative.events.AndroidEvent
 import app.gamenative.ui.screen.wow.WowClientDownloader.BUILD_INFO
-import app.gamenative.ui.screen.wow.WowClientDownloader.EXE_NAME
 import app.gamenative.ui.screen.wow.WowClientDownloader.FLAVOR_DIR
 import app.gamenative.ui.screen.wow.WowClientDownloader.TARGET_PRODUCT
 import app.gamenative.ui.theme.WowBackgroundGradient
@@ -81,6 +81,7 @@ fun WoWForeverScreen(
     val scope = rememberCoroutineScope()
     val gpu = remember { GpuProfile.detect(context) }
 
+    var flavor by remember { mutableStateOf(WowFlavor.load(context)) }
     var gamePath by remember { mutableStateOf(GamePath.load(context)) }
     var files by remember { mutableStateOf(GamePath.Status()) }
     var isLaunching by remember { mutableStateOf(false) }
@@ -163,9 +164,19 @@ fun WoWForeverScreen(
     fun checkFiles(): Boolean {
         files = GamePath.status(context, gamePath)
         if (files.isWrongGame) {
-            errorMessage = "Incompatible game (${files.product}). WoW Forever requires World of Warcraft Classic Beta ($TARGET_PRODUCT)."
+            errorMessage = "Incompatible game (${files.product}). ${flavor.label} needs a $BUILD_INFO entry for $TARGET_PRODUCT."
         }
         return files.isReady
+    }
+
+    fun selectFlavor(selected: WowFlavor) {
+        if (selected == flavor || isLaunching || isUpdating) return
+        WowFlavor.select(context, selected)
+        flavor = selected
+        errorMessage = null
+        versionStatus = null
+        gamePath = GamePath.load(context)
+        if (checkFiles()) checkVersionStatus()
     }
 
     fun denyStorageAccess() {
@@ -347,7 +358,7 @@ fun WoWForeverScreen(
                     color = Color(0xFFF0E6D2)
                 )
                 Text(
-                    text = "FOREVER BETA (ARM64 NATIVE)",
+                    text = flavor.subtitle,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.sp,
@@ -355,6 +366,8 @@ fun WoWForeverScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(text = "${gpu.edition} Edition", fontSize = 11.sp, color = WowSubtle)
+                Spacer(modifier = Modifier.height(12.dp))
+                FlavorSelector(selected = flavor, enabled = !isLaunching && !isUpdating, onSelect = { selectFlavor(it) })
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -371,7 +384,7 @@ fun WoWForeverScreen(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CheckItem(label = if (files.exeExists) "ARM64 Binary ($EXE_NAME)" else "ARM64 Binary (downloads on Play)", ready = files.exeExists)
+                        CheckItem(label = if (files.exeExists) "ARM64 Binary (${files.exeName})" else "ARM64 Binary (downloads on Play)", ready = files.exeExists)
                         CheckItem(label = "Game Asset Archives (Data/)", ready = files.dataExists)
                         CheckItem(
                             label = if (files.isWrongGame) "Install Info ($BUILD_INFO - requires $TARGET_PRODUCT)" else "Install Info ($BUILD_INFO)",
@@ -737,10 +750,15 @@ object GamePath {
     private const val PREFS = "wow_forever"
     private const val KEY_GAME_PATH = "game_path"
 
-    private val defaultPath = File(Environment.getExternalStorageDirectory(), "WoW Forever")
+    // Forever keeps the original key so existing installs keep their saved folder.
+    private fun pathKey(flavor: WowFlavor = WowFlavor.current) =
+        if (flavor == WowFlavor.FOREVER) KEY_GAME_PATH else "${KEY_GAME_PATH}_${flavor.name.lowercase()}"
+
+    private val defaultPath get() = File(Environment.getExternalStorageDirectory(), WowFlavor.current.defaultFolder)
 
     data class Status(
         val exeExists: Boolean = false,
+        val exeName: String = "",
         val dataExists: Boolean = false,
         val buildInfoExists: Boolean = false,
         val product: String = "",
@@ -752,8 +770,10 @@ object GamePath {
 
     fun status(context: Context, path: String): Status {
         val root = File(path)
+        val exe = WowFlavor.current.exeFile(root)
         return Status(
-            exeExists = File(root, "$FLAVOR_DIR/$EXE_NAME").exists(),
+            exeExists = exe.exists(),
+            exeName = exe.name,
             dataExists = File(root, "Data").listFiles()?.isNotEmpty() == true,
             buildInfoExists = File(root, BUILD_INFO).isFile,
             product = productOf(root).orEmpty(),
@@ -762,24 +782,49 @@ object GamePath {
     }
 
     fun load(context: Context): String {
-        val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_GAME_PATH, null)?.let(::File)
-        val usable = listOfNotNull(saved, defaultPath).firstOrNull { productOf(it) == TARGET_PRODUCT }
+        WowFlavor.load(context)
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.getString(pathKey(), null)?.let(::File)
+        // A single Battle.net-style folder can hold several products, so the other flavors' folders are candidates too.
+        val others = WowFlavor.entries.mapNotNull { prefs.getString(pathKey(it), null)?.let(::File) }
+        val usable = (listOfNotNull(saved, defaultPath) + others).firstOrNull { productOf(it) == TARGET_PRODUCT }
         return (usable ?: saved ?: defaultPath).absolutePath
     }
 
     fun save(context: Context, path: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_GAME_PATH, path).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(pathKey(), path).apply()
     }
 
     fun isReady(context: Context, path: String = load(context)): Boolean =
         path.isNotEmpty() && status(context, path).let { it.isReady && it.product == TARGET_PRODUCT }
 
     fun findGameRoot(picked: File): File? =
-        sequenceOf(picked, picked.parentFile, File(picked, "WoW Forever"), File(picked, "World of Warcraft"))
+        sequenceOf(picked, picked.parentFile, File(picked, WowFlavor.current.defaultFolder), File(picked, "WoW Forever"), File(picked, "World of Warcraft"))
             .filterNotNull()
             .firstOrNull { File(it, BUILD_INFO).isFile }
 
     private fun productOf(root: File) = WowClientDownloader.readBuildInfo(File(root, BUILD_INFO))?.get("Product")
+}
+
+@Composable
+private fun FlavorSelector(selected: WowFlavor, enabled: Boolean, onSelect: (WowFlavor) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        WowFlavor.entries.forEach { flavor ->
+            val isSelected = flavor == selected
+            OutlinedButton(
+                onClick = { onSelect(flavor) },
+                enabled = enabled,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, if (isSelected) WowGold else Color(0xFF2A3C54)),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = if (isSelected) WowBronze.copy(alpha = 0.35f) else Color.Transparent,
+                    contentColor = if (isSelected) Color.White else WowMuted,
+                ),
+            ) {
+                Text(flavor.label.uppercase(), fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            }
+        }
+    }
 }
 
 @Composable
@@ -865,19 +910,21 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, onS
         throw e
     }
 
-    val arm64Exe = File(gameRoot, "$FLAVOR_DIR/$EXE_NAME")
-    if (!arm64Exe.exists()) {
+    val flavor = WowFlavor.current
+    if (!flavor.exeFile(gameRoot).exists()) {
         try {
             WowClientDownloader.download(gameRoot, onStatus)
         } catch (e: Exception) {
-            if (!arm64Exe.exists()) throw IllegalStateException("Couldn't download $EXE_NAME: ${e.message}", e)
-            Timber.w(e, "Client update check failed, launching the existing $EXE_NAME")
+            if (!flavor.exeFile(gameRoot).exists()) throw IllegalStateException("Couldn't download the ${flavor.label} client: ${e.message}", e)
+            Timber.w(e, "Client update check failed, launching the existing ${flavor.label} client")
         }
     }
+    val arm64Exe = flavor.exeFile(gameRoot)
+    check(arm64Exe.exists()) { "No ARM64 client in ${arm64Exe.parent} after download." }
 
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val config = containerConfig(gameRoot, gpu)
+    val config = containerConfig(gameRoot, gpu, arm64Exe.name)
     val container = containerManager.getContainerById(CONTAINER_ID)
     if (container == null) {
         onStatus("Creating prefix environment (first boot)...")
@@ -890,7 +937,7 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, onS
     return CONTAINER_ID
 }
 
-private fun containerConfig(gameRoot: File, gpu: GpuProfile): JSONObject {
+private fun containerConfig(gameRoot: File, gpu: GpuProfile, exeName: String): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
     return JSONObject().apply {
@@ -908,7 +955,7 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile): JSONObject {
         put("containerVariant", "bionic")
         put("fexcoreVersion", "2609-0")
         put("drives", "D:/storage/emulated/0/DownloadE:/data/data/app.wowforever/storageG:${gameRoot.path}")
-        put("executablePath", "G:\\$FLAVOR_DIR\\$EXE_NAME")
+        put("executablePath", "G:\\$FLAVOR_DIR\\$exeName")
         put("execArgs", "-d3d11")
         put("showFPS", true)
         put("startupSelection", Container.STARTUP_SELECTION_AGGRESSIVE.toInt())
@@ -917,8 +964,8 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile): JSONObject {
     }
 }
 
-private val CONFIG_DEFAULTS = linkedMapOf(
-    "portal" to "\"test\"",
+private val CONFIG_DEFAULTS get() = linkedMapOf(
+    "portal" to "\"${WowFlavor.current.portal}\"",
     "agentUID" to "\"$TARGET_PRODUCT\"",
     "gxApi" to "\"D3D11\"",
     "textLocale" to "\"enUS\"",
@@ -964,6 +1011,7 @@ private val LEGACY_CONFIG_VALUES = mapOf(
 )
 
 private fun ensureGameConfig(root: File) {
+    val defaults = CONFIG_DEFAULTS
     val flavorDir = File(root, FLAVOR_DIR)
     flavorDir.mkdirs()
     val flavorInfo = File(flavorDir, ".flavor.info")
@@ -973,7 +1021,7 @@ private fun ensureGameConfig(root: File) {
     val configWtf = File(flavorDir, "WTF/Config.wtf")
     if (!configWtf.exists()) {
         configWtf.parentFile?.mkdirs()
-        configWtf.writeText(CONFIG_DEFAULTS.entries.joinToString("\n") { "SET ${it.key} ${it.value}" } + "\n")
+        configWtf.writeText(defaults.entries.joinToString("\n") { "SET ${it.key} ${it.value}" } + "\n")
         return
     }
 
@@ -986,11 +1034,11 @@ private fun ensureGameConfig(root: File) {
         existingKeys.add(key)
         val forcedKey = FORCED_CONFIG_KEYS.firstOrNull { it.equals(key, ignoreCase = true) }
         when {
-            forcedKey != null && value != CONFIG_DEFAULTS.getValue(forcedKey) -> "SET $forcedKey ${CONFIG_DEFAULTS.getValue(forcedKey)}"
-            LEGACY_CONFIG_VALUES[key] == value -> "SET $key ${CONFIG_DEFAULTS.getValue(key)}"
+            forcedKey != null && value != defaults.getValue(forcedKey) -> "SET $forcedKey ${defaults.getValue(forcedKey)}"
+            LEGACY_CONFIG_VALUES[key] == value -> "SET $key ${defaults.getValue(key)}"
             else -> line
         }
-    } + CONFIG_DEFAULTS.filterKeys { it !in existingKeys }.map { (k, v) -> "SET $k $v" }
+    } + defaults.filterKeys { it !in existingKeys }.map { (k, v) -> "SET $k $v" }
 
     if (updated != original) {
         configWtf.writeText(updated.joinToString("\n") + "\n")

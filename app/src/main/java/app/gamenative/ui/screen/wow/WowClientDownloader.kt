@@ -14,13 +14,13 @@ import java.util.zip.Inflater
 import timber.log.Timber
 
 object WowClientDownloader {
-    const val FLAVOR_DIR = "_classic_beta_"
-    const val EXE_NAME = "WowB-ARM64.exe"
-    const val TARGET_PRODUCT = "wow_classic_beta"
+    val FLAVOR_DIR get() = WowFlavor.current.dir
+    val EXE_NAME get() = WowFlavor.current.exeName
+    val TARGET_PRODUCT get() = WowFlavor.current.product
     const val BUILD_INFO = ".build.info"
     private const val PLATFORM_ARCH = "arm64"
     private const val EXCLUDED_ARCH = "x86_64"
-    private const val PATCH_URL = "http://us.patch.battle.net:1119/$TARGET_PRODUCT"
+    private val PATCH_URL get() = "http://us.patch.battle.net:1119/$TARGET_PRODUCT"
     private const val DEFAULT_CDN_PATH = "tpr/wow"
     private val DEFAULT_CDN_HOSTS = listOf("level3.blizzard.com", "us.cdn.blizzard.com")
 
