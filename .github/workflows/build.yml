@@ -19,7 +19,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Install NDK
-        run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724" > /dev/null
+        run: |
+          echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Cache runtime components
         uses: actions/cache@v4
