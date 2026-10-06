@@ -18,6 +18,7 @@ import com.winlator.inputcontrols.Binding;
 import com.winlator.math.Mathf;
 import com.winlator.math.XForm;
 import com.winlator.renderer.ViewTransformation;
+import com.winlator.renderer.VulkanRenderer;
 import com.winlator.winhandler.MouseEventFlags;
 import com.winlator.winhandler.WinHandler;
 import com.winlator.xserver.Pointer;
@@ -293,7 +294,19 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
         updateXform(w, h, screenInfo.width, screenInfo.height);
     }
 
+    /** Recompute the touch-to-X mapping, e.g. after the renderer starts showing only part of the screen. */
+    public void refreshXform() {
+        if (getWidth() > 0 && getHeight() > 0) {
+            updateXform(getWidth(), getHeight(), xServer.screenInfo.width, xServer.screenInfo.height);
+        }
+    }
+
     private void updateXform(int outerWidth, int outerHeight, int innerWidth, int innerHeight) {
+        // In dual-screen split mode this display shows only the top of the X screen, which starts at 0,0.
+        if (xServer.getRenderer() instanceof VulkanRenderer vr && vr.getSourceRegion() != null) {
+            innerWidth = vr.getSourceRegion()[2];
+            innerHeight = vr.getSourceRegion()[3];
+        }
         ViewTransformation viewTransformation = new ViewTransformation();
         viewTransformation.update(outerWidth, outerHeight, innerWidth, innerHeight);
         float invAspect = 1.0f / viewTransformation.aspect;

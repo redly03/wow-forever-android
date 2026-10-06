@@ -89,6 +89,10 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         new java.util.WeakHashMap<>();
     private final java.util.concurrent.atomic.AtomicBoolean scenePending =
         new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Dual-screen split: the part of the X screen this renderer shows (null = all of it), and an
+    // optional second renderer that also receives presented game frames (the other display).
+    private volatile int[] sourceRegion = null;
+    private volatile VulkanRenderer mirror = null;
     private android.view.SurfaceControl scanoutGameSC;
     private android.view.SurfaceControl scanoutCursorSC;
     private android.view.Surface        scanoutGameSurface;
@@ -100,6 +104,26 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         rootCursorDrawable = createRootCursorDrawable();
         xServer.windowManager.addOnWindowModificationListener(this);
         xServer.pointer.addOnPointerMotionListener(this);
+    }
+
+    /** Show only this rectangle of the X screen, scaled to fit the surface. */
+    public void setSourceRegion(int x, int y, int width, int height) {
+        sourceRegion = new int[]{x, y, width, height};
+        if (surfaceWidth > 0 && surfaceHeight > 0) {
+            viewTransformation.update(surfaceWidth, surfaceHeight, width, height);
+        }
+        synchronized (lock) { updateTransform(); }
+    }
+
+    public int[] getSourceRegion() { return sourceRegion; }
+
+    /** Forward presented frames to a renderer on another display, so both show the same X screen. */
+    public void setMirror(VulkanRenderer mirror) { this.mirror = mirror; }
+
+    /** Stop listening to the X server. Used when a secondary renderer's display goes away. */
+    public void detach() {
+        xServer.windowManager.removeOnWindowModificationListener(this);
+        xServer.pointer.removeOnPointerMotionListener(this);
     }
 
     private Drawable createRootCursorDrawable() {
@@ -261,7 +285,9 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     public void onSurfaceChanged(int width, int height) {
         surfaceWidth = width; surfaceHeight = height;
-        viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height);
+        int[] region = sourceRegion;
+        if (region != null) viewTransformation.update(width, height, region[2], region[3]);
+        else viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height);
         synchronized (lock) {
             if (nativeHandle != 0) {
                 nativeResize(nativeHandle, width, height);
@@ -323,6 +349,19 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     private void updateTransform() {
         if (nativeHandle == 0) return;
+        int[] region = sourceRegion;
+        if (region != null && surfaceWidth > 0 && surfaceHeight > 0) {
+            // NDC = (ox + x * sx) / screenWidth * 2 - 1, so map the region's origin to the
+            // fitted view's top-left and scale it by the fit factor.
+            float cw = xServer.screenInfo.width, ch = xServer.screenInfo.height;
+            float aspect = viewTransformation.aspect;
+            float sx = aspect * cw / surfaceWidth;
+            float sy = aspect * ch / surfaceHeight;
+            float ox = cw * (viewTransformation.viewOffsetX - region[0] * aspect) / surfaceWidth;
+            float oy = ch * (viewTransformation.viewOffsetY - region[1] * aspect) / surfaceHeight;
+            nativeSetTransform(nativeHandle, ox, oy, sx, sy);
+            return;
+        }
         if (fullscreen || outputScalingMode == SCALE_STRETCH) {
             nativeSetTransform(nativeHandle, 0, 0, 1.0f, 1.0f);
             nativeScanoutSetDst(nativeHandle,
@@ -470,6 +509,8 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     public void onUpdateWindowContentDirect(Window window, Drawable pixmap, short xOff, short yOff) {
         if (!flatPresentationEnabled) return;
+        VulkanRenderer m = mirror;
+        if (m != null) m.onUpdateWindowContentDirect(window, pixmap, xOff, yOff);
         if (hudRef != null && !nativeMode) hudRef.update();
         if (nativeHandle == 0 || pixmap == null) return;
         Drawable targetDrawable = window.getContent();

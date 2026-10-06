@@ -36,6 +36,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import app.gamenative.BuildConfig
 import app.gamenative.PluviaApp
 import app.gamenative.events.AndroidEvent
+import app.gamenative.externaldisplay.SplitScreenController
 import app.gamenative.ui.screen.wow.WowClientDownloader.BUILD_INFO
 import app.gamenative.ui.screen.wow.WowClientDownloader.FLAVOR_DIR
 import app.gamenative.ui.screen.wow.WowClientDownloader.TARGET_PRODUCT
@@ -82,6 +83,7 @@ fun WoWForeverScreen(
     val gpu = remember { GpuProfile.detect(context) }
 
     var flavor by remember { mutableStateOf(WowFlavor.load(context)) }
+    var dualScreen by remember { mutableStateOf(DualScreen.isEnabled(context)) }
     var gamePath by remember { mutableStateOf(GamePath.load(context)) }
     var files by remember { mutableStateOf(GamePath.Status()) }
     var isLaunching by remember { mutableStateOf(false) }
@@ -368,6 +370,18 @@ fun WoWForeverScreen(
                 Text(text = "${gpu.edition} Edition", fontSize = 11.sp, color = WowSubtle)
                 Spacer(modifier = Modifier.height(12.dp))
                 FlavorSelector(selected = flavor, enabled = !isLaunching && !isUpdating, onSelect = { selectFlavor(it) })
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "Second screen UI (experimental)", fontSize = 12.sp, color = WowMuted)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = dualScreen,
+                        enabled = !isLaunching,
+                        onCheckedChange = {
+                            dualScreen = it
+                            DualScreen.setEnabled(context, it)
+                        },
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -559,7 +573,7 @@ fun WoWForeverScreen(
                             onClick = { StorageUtils.requestManageExternalStoragePermission(context) },
                         )
                         else -> PrimaryButton(
-                            text = if (files.isWrongGame) "FOREVER BETA REQUIRED" else "PLAY WORLD OF WARCRAFT",
+                            text = if (files.isWrongGame) "${flavor.label.uppercase()} INSTALL REQUIRED" else "PLAY WORLD OF WARCRAFT",
                             icon = Icons.Default.PlayArrow,
                             enabled = canPlay,
                             onClick = ::launchGame,
@@ -870,6 +884,30 @@ private fun CheckItem(label: String, ready: Boolean) {
     }
 }
 
+/**
+ * Second-screen UI: when on and a second display is present, the game window is made taller than
+ * the top screen and the extra rows are shown 1:1 on the second display (see SplitScreenController).
+ * An addon such as Offhand then keeps the 3D world on top and puts UI panels in the bottom band.
+ */
+private object DualScreen {
+    private const val PREFS = "wow_forever"
+    private const val KEY = "dual_screen_ui"
+
+    data class Layout(val screenSize: String, val topHeight: Int)
+
+    fun isEnabled(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY, false)
+
+    fun setEnabled(context: Context, enabled: Boolean) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY, enabled).apply()
+
+    fun layout(context: Context, gpu: GpuProfile): Layout? {
+        if (!isEnabled(context)) return null
+        val (bandWidth, bandHeight) = SplitScreenController.secondDisplaySize(context) ?: return null
+        val (topWidth, topHeight) = gpu.screenSize.split("x").map { it.toInt() }
+        return Layout("${maxOf(topWidth, bandWidth)}x${topHeight + bandHeight}", topHeight)
+    }
+}
+
 private class StorageAccessDeniedException(cause: Throwable) : Exception(cause)
 
 private fun Throwable.isPermissionDenied() =
@@ -924,26 +962,28 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, onS
 
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val config = containerConfig(gameRoot, gpu, arm64Exe.name)
-    val container = containerManager.getContainerById(CONTAINER_ID)
-    if (container == null) {
+    val split = DualScreen.layout(context, gpu)
+    val config = containerConfig(gameRoot, gpu, arm64Exe.name, split?.screenSize ?: gpu.screenSize)
+    val existing = containerManager.getContainerById(CONTAINER_ID)
+    if (existing == null) {
         onStatus("Creating prefix environment (first boot)...")
         containerManager.createContainer(CONTAINER_ID, config)
     } else {
-        container.loadData(config)
-        container.saveData()
+        existing.loadData(config)
     }
-    check(containerManager.hasContainer(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
+    val container = checkNotNull(containerManager.getContainerById(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
+    container.putExtra("splitTopHeight", split?.topHeight)
+    container.saveData()
     return CONTAINER_ID
 }
 
-private fun containerConfig(gameRoot: File, gpu: GpuProfile, exeName: String): JSONObject {
+private fun containerConfig(gameRoot: File, gpu: GpuProfile, exeName: String, screenSize: String): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
     return JSONObject().apply {
         put("id", CONTAINER_ID)
         put("name", "WoW Forever")
-        put("screenSize", gpu.screenSize)
+        put("screenSize", screenSize)
         put("envVars", envVars)
         put("graphicsDriver", "Wrapper")
         put("graphicsDriverVersion", gpu.driver)
