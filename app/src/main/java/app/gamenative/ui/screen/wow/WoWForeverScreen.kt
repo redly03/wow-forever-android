@@ -977,8 +977,10 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, onS
     installBundledComponents(context, onStatus)
 
     check(File(gameRoot, BUILD_INFO).exists()) { "Missing $BUILD_INFO in $gameRoot. Copy it from your WoW install." }
+    val split = DualScreen.layout(context, gpu)
+    val screenSize = split?.screenSize ?: gpu.screenSize
     try {
-        ensureGameConfig(gameRoot)
+        ensureGameConfig(gameRoot, screenSize)
     } catch (e: Exception) {
         if (e.isPermissionDenied()) throw StorageAccessDeniedException(e)
         throw e
@@ -1002,8 +1004,7 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, onS
 
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val split = DualScreen.layout(context, gpu)
-    val config = containerConfig(gameRoot, gpu, arm64Exe.name, split?.screenSize ?: gpu.screenSize)
+    val config = containerConfig(gameRoot, gpu, arm64Exe.name, screenSize)
     val existing = containerManager.getContainerById(CONTAINER_ID)
     if (existing == null) {
         onStatus("Creating prefix environment (first boot)...")
@@ -1075,7 +1076,9 @@ private val CONFIG_DEFAULTS get() = linkedMapOf(
     "InputDeviceInterfaceStyle" to "\"1\"",
 )
 
-private val FORCED_CONFIG_KEYS = listOf("gxApi", "RenderScale", "ResampleQuality", "GamePadEnable", "InputDeviceInterfaceStyle")
+// The window size follows the X screen (which changes with the second-screen toggle), so WoW can't
+// keep a stale size from an earlier launch and lay its UI out past the edge of the display.
+private val FORCED_CONFIG_KEYS = listOf("gxApi", "RenderScale", "ResampleQuality", "GamePadEnable", "InputDeviceInterfaceStyle", "gxMaximize", "gxWindowedResolution")
 
 private val LEGACY_CONFIG_VALUES = mapOf(
     "farclip" to "\"3000\"",
@@ -1090,8 +1093,8 @@ private val LEGACY_CONFIG_VALUES = mapOf(
     "RAIDcomponentTextureLevel" to "\"1\"",
 )
 
-private fun ensureGameConfig(root: File) {
-    val defaults = CONFIG_DEFAULTS
+private fun ensureGameConfig(root: File, screenSize: String) {
+    val defaults = CONFIG_DEFAULTS.apply { put("gxWindowedResolution", "\"$screenSize\"") }
     val flavorDir = File(root, FLAVOR_DIR)
     flavorDir.mkdirs()
     val flavorInfo = File(flavorDir, ".flavor.info")
