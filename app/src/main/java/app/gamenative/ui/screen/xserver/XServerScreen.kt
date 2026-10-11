@@ -105,8 +105,6 @@ import app.gamenative.ui.component.parsePositiveFpsLimit
 import app.gamenative.ui.data.PerformanceHudConfig
 import app.gamenative.ui.data.PerformanceHudSize
 import app.gamenative.ui.data.XServerState
-import app.gamenative.ui.screen.wow.BattleNetSignIn
-import app.gamenative.ui.screen.wow.BattleNetSignInHost
 import app.gamenative.ui.widget.PerformanceHudView
 import app.gamenative.utils.AssetUtils
 import app.gamenative.utils.ContainerUtils
@@ -434,8 +432,11 @@ fun XServerScreen(
     var taskAffinityMask = 0
     var taskAffinityMaskWoW64 = 0
 
-    LaunchedEffect(appId) {
+    DisposableEffect(Unit) {
         isExiting.set(false)
+        onDispose {
+            isExiting.set(false)
+        }
     }
 
     val container = remember(appId) {
@@ -555,7 +556,6 @@ fun XServerScreen(
     var debugGestureName by remember { mutableStateOf("") }
     var debugGestureKey by remember { mutableIntStateOf(0) }
     var keyboardRequestedFromOverlay by remember { mutableStateOf(false) }
-    var bnetSignInRequestedFromOverlay by remember { mutableStateOf(false) }
     var shouldForceResumeOnMenuClose by remember { mutableStateOf(false) }
     var showQuickMenu by remember { mutableStateOf(false) }
     var quickMenuToolsVisible by remember { mutableStateOf(false) }
@@ -1093,9 +1093,8 @@ fun XServerScreen(
         if (!keyboardRequestedFromOverlay) {
             imeInputReceiver?.hideKeyboard()
         }
-        shouldForceResumeOnMenuClose = (keyboardRequestedFromOverlay || bnetSignInRequestedFromOverlay) && manualResumeMode && !keepPausedForEditor
+        shouldForceResumeOnMenuClose = keyboardRequestedFromOverlay && manualResumeMode && !keepPausedForEditor
         keyboardRequestedFromOverlay = false
-        bnetSignInRequestedFromOverlay = false
         showQuickMenu = false
     }
 
@@ -1135,12 +1134,6 @@ fun XServerScreen(
 
     val onQuickMenuItemSelected: (Int) -> Boolean = { itemId ->
         when (itemId) {
-            QuickMenuAction.BATTLE_NET_SIGN_IN -> {
-                bnetSignInRequestedFromOverlay = true
-                BattleNetSignIn.requested.value = true
-                true
-            }
-
             QuickMenuAction.KEYBOARD -> {
                 keyboardRequestedFromOverlay = true
                 showSoftKeyboard(view, "onscreen_keyboard_enabled")
@@ -2696,13 +2689,6 @@ fun XServerScreen(
             )
         }
 
-        BattleNetSignInHost(
-            onBeforeTyping = {
-                dismissOverlayMenu()
-                forceResumeIfSuspended()
-            },
-        )
-
         QuickMenu(
             isVisible = showQuickMenu,
             onDismiss = dismissOverlayMenu,
@@ -3930,6 +3916,11 @@ private fun exit(
         Timber.e(e, "winHandler.stop() failed during exit")
     }
     PluviaApp.shutdownEnvironment()
+    try {
+        ProcessHelper.killAllWineProcesses()
+    } catch (e: Exception) {
+        Timber.e(e, "killAllWineProcesses failed during exit")
+    }
 
     // empty Wine/XDG trash in background after container stops
     CoroutineScope(Dispatchers.IO).launch {
@@ -3951,6 +3942,7 @@ private fun exit(
     }
     frameRating?.writeSessionSummary()
     onExit(null)
+    isExiting.set(false)
     navigateBack()
 }
 
